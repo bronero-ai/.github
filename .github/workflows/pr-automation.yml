@@ -1,0 +1,236 @@
+name: PR Automation
+
+on:
+  pull_request:
+    types: [opened, edited, labeled, synchronize]
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["*"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  pr-automation:
+    runs-on: ubuntu-latest
+    # Only run on PRs or PR comments
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0])
+    
+    steps:
+      - name: Get PR number
+        id: get-pr
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            echo "pr_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "pr_number=${{ github.event.workflow_run.pull_requests[0].number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get PR details
+        id: pr-details
+        if: steps.get-pr.outputs.pr_number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: ${{ steps.get-pr.outputs.pr_number }}
+            });
+            
+            core.setOutput('pr_body', pr.data.body || '');
+            core.setOutput('pr_title', pr.data.title || '');
+            core.setOutput('pr_state', pr.data.state);
+            
+            return pr.data;
+
+      - name: Check for needs-comment label
+        id: check-label
+        if: |
+          github.event_name == 'pull_request' &&
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'needs-comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prBody = `${{ steps.pr-details.outputs.pr_body }}`;
+            const requiredSections = ['Summary', 'Tests', 'Risks', 'Checklist'];
+            const missingSections = [];
+            
+            for (const section of requiredSections) {
+              const regex = new RegExp(`##\\s*${section}`, 'i');
+              if (!regex.test(prBody)) {
+                missingSections.push(section);
+              }
+            }
+            
+            if (missingSections.length > 0 || !prBody.trim()) {
+              const commentBody = `👋 Hi! This PR has been labeled with \`needs-comment\`.
+
+            Please ensure your PR description includes the following sections:
+            ${missingSections.length > 0 ? missingSections.map(s => `- [ ] **${s}**`).join('\n') : ''}
+
+            Also, make sure to complete the checklist in your PR description.
+
+            Thank you! 🙏`;
+              
+              // Check if comment already exists
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.get-pr.outputs.pr_number }}
+              });
+              
+              const existingComment = comments.data.find(c => 
+                c.body.includes('This PR has been labeled with `needs-comment`') &&
+                c.user.type === 'Bot'
+              );
+              
+              if (!existingComment) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: ${{ steps.get-pr.outputs.pr_number }},
+                  body: commentBody
+                });
+              }
+            }
+
+      - name: Handle review-check command
+        id: review-check
+        if: |
+          github.event_name == 'issue_comment' &&
+          github.event.comment.body &&
+          contains(github.event.comment.body, '/review-check')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentBody = `📋 **PR Review Checklist**
+
+            Please ensure you've completed the following:
+
+            - [ ] PR description includes a **Summary** section
+            - [ ] PR description includes a **Tests** section
+            - [ ] PR description includes a **Risks** section
+            - [ ] PR description includes a completed **Checklist**
+            - [ ] Code has been self-reviewed
+            - [ ] Tests have been added/updated (if applicable)
+            - [ ] Documentation has been updated (if applicable)
+            - [ ] All CI checks are passing
+
+            ---
+            _Requested by @${{ github.event.comment.user.login }}_`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.get-pr.outputs.pr_number }},
+              body: commentBody
+            });
+
+      - name: Check for missing required sections
+        id: check-sections
+        if: |
+          github.event_name == 'pull_request' &&
+          (github.event.action == 'opened' || github.event.action == 'edited')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prBody = `${{ steps.pr-details.outputs.pr_body }}`;
+            const requiredSections = ['Summary', 'Tests', 'Risks'];
+            const missingSections = [];
+            
+            for (const section of requiredSections) {
+              const regex = new RegExp(`##\\s*${section}`, 'i');
+              if (!regex.test(prBody)) {
+                missingSections.push(section);
+              }
+            }
+            
+            if (missingSections.length > 0) {
+              const commentBody = `⚠️ **Missing Required Sections**
+
+            Your PR description is missing the following required sections:
+            ${missingSections.map(s => `- **${s}**`).join('\n')}
+
+            Please update your PR description to include these sections. You can use the PR template for guidance.
+
+            ---
+            _This is an automated message to help maintain PR quality._`;
+              
+              // Check if we already posted this comment recently
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.get-pr.outputs.pr_number }}
+              });
+              
+              const recentComment = comments.data.find(c => 
+                c.body.includes('Missing Required Sections') &&
+                c.user.type === 'Bot' &&
+                (Date.now() - new Date(c.created_at).getTime()) < 3600000 // Within 1 hour
+              );
+              
+              if (!recentComment) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: ${{ steps.get-pr.outputs.pr_number }},
+                  body: commentBody
+                });
+              }
+            }
+
+      - name: Comment on failed CI runs
+        id: failed-ci
+        if: |
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'failure' &&
+          github.event.workflow_run.pull_requests[0]
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workflowName = '${{ github.event.workflow_run.name }}';
+            const runId = '${{ github.event.workflow_run.id }}';
+            const runUrl = '${{ github.event.workflow_run.html_url }}';
+            
+            const commentBody = `❌ **CI Workflow Failed**
+
+            The workflow **${workflowName}** has failed for this PR.
+
+            🔗 [View failed workflow run](${runUrl})
+
+            Please review the logs and fix any issues.
+
+            ---
+            _This is an automated notification._`;
+            
+            // Check if we already commented on this specific run
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.get-pr.outputs.pr_number }}
+            });
+            
+            const existingComment = comments.data.find(c => 
+              c.body.includes(runId) &&
+              c.user.type === 'Bot'
+            );
+            
+            if (!existingComment) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.get-pr.outputs.pr_number }},
+                body: commentBody
+              });
+            }
