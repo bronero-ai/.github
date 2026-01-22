@@ -30,7 +30,7 @@ README.md
   - Responds to `/review-check` command in comments with a review checklist
   - Posts automated notifications when CI workflows fail
 
-- **`README.md`**: Contains a personal philosophy and manifest (in Czech language)
+- **`README.md` / `README.MD`**: Two README files exist in the repository. `README.MD` (uppercase) contains a personal philosophy and manifest in Czech language, while `README.md` (lowercase) contains minimal content ("Boot coo")
 
 ## Working with This Repository
 
@@ -87,16 +87,21 @@ When working on this repository:
 
 ### Adding a new workflow
 ```bash
-# Create new workflow file
+# Navigate to workflows directory
 cd .github/workflows
-# Edit new workflow file with appropriate triggers and steps
+# Create new workflow file
+touch new-workflow.yml
+# Edit with your preferred editor
+nano new-workflow.yml
+# Validate YAML syntax before committing
 ```
 
 ### Updating PR template
 ```bash
 # Edit the template
 vim .github/PULL_REQUEST_TEMPLATE.md
-# Ensure consistency with pr-automation.yml validation
+# Verify consistency with pr-automation.yml validation logic
+grep -E "Summary|Tests|Risks" .github/workflows/pr-automation.yml
 ```
 
 ### Testing workflows locally
